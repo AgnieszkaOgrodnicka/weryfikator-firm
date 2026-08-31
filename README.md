@@ -1,0 +1,1 @@
+# weryfikator-firm
