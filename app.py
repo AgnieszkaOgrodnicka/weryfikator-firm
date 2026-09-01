@@ -150,7 +150,7 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
     with st.spinner("1/3 Parsowanie danych wejściowych..."):
         parse_prompt = f"Wyodrębnij dane firmy z tekstu: {wklejony_tekst}"
         parse_resp = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-1.5-flash',
             contents=parse_prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -187,7 +187,7 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
         with st.spinner("2/3 Szukanie w rejestrach krajowych lub na oficjalnej stronie firmy..."):
             search_query = f"Official business registry or company website imprint terms contact for: {dane_firmy.nazwa}, {dane_firmy.kraj}, Tax ID: {dane_firmy.nip}"
             search_resp = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-1.5-flash',
                 contents=f"Find the direct URL for legal imprint, company registry or terms of service page with company details for: {search_query}. Return ONLY the direct URL.",
                 config=types.GenerateContentConfig(
                     tools=[{"google_search": {}}]
@@ -221,7 +221,7 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
         Podaj cytat w języku obcym i jego polskie tłumaczenie. Oceń wiarygodność źródła.
         """
         eval_resp = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-1.5-flash',
             contents=eval_prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
