@@ -35,36 +35,6 @@ def format_filename(nazwa_firmy: str) -> str:
     data_dzis = datetime.now().strftime("%Y-%m-%d")
     return f"{czysta_nazwa}_{data_dzis}.pdf"
 
-def generuj_html_vies(kraj, nip, nazwa, adres, zrodlo):
-    return f"""
-    <div style="font-family: Arial, sans-serif; padding: 40px; color: #333;">
-        <h2 style="color: #1e3a8a;">Potwierdzenie Aktywności VAT (UE)</h2>
-        <hr>
-        <p><b>Data weryfikacji:</b> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
-        <p><b>Źródło:</b> {zrodlo}</p>
-        <br>
-        <h3 style="color: green;">STATUS: AKTYWNY (VALID)</h3>
-        <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
-            <tr style="border-bottom: 1px solid #ccc;">
-                <td style="padding: 10px 0; width: 30%;"><b>Kraj:</b></td>
-                <td style="padding: 10px 0;">{kraj}</td>
-            </tr>
-            <tr style="border-bottom: 1px solid #ccc;">
-                <td style="padding: 10px 0;"><b>Numer VAT:</b></td>
-                <td style="padding: 10px 0;">{nip}</td>
-            </tr>
-            <tr style="border-bottom: 1px solid #ccc;">
-                <td style="padding: 10px 0;"><b>Zarejestrowana Nazwa:</b></td>
-                <td style="padding: 10px 0;">{nazwa}</td>
-            </tr>
-            <tr style="border-bottom: 1px solid #ccc;">
-                <td style="padding: 10px 0;"><b>Zarejestrowany Adres:</b></td>
-                <td style="padding: 10px 0;">{adres}</td>
-            </tr>
-        </table>
-    </div>
-    """
-
 # --- LOGOWANIE ---
 def check_password():
     app_password = st.secrets.get("APP_PASSWORD", "admin123")
@@ -91,14 +61,13 @@ st.title("🔍 Automatyczny Weryfikator Kontrahentów")
 st.caption("VIES API ➔ Bazy państwowe / komercyjne ➔ Strona zleceniodawcy")
 
 api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
+
 if not api_key:
     st.error("⚠️ Brak klucza GEMINI_API_KEY w Secrets!")
     st.stop()
 
 genai.configure(api_key=api_key)
-# Zmiana modelu na wersję z limitem 1500 zapytań dziennie
-dostepne_modele = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-model = genai.GenerativeModel(dostepne_modele[0])
+model = genai.GenerativeModel("gemini-3.6-flash")
 
 wklejony_tekst = st.text_area(
     "Wklej dane kontrahenta (Nazwa, Adres, Kraj, NIP/Tax ID):",
@@ -106,6 +75,7 @@ wklejony_tekst = st.text_area(
     placeholder="Przykład:\nNYLON FRANCE\n123 RUE DE PARIS\nFrancja\nVAT: FR07883003964"
 )
 
+# --- OBSŁUGA PRZEGLĄDARKI I API ---
 async def generuj_pdf_z_html(html_content: str):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -118,6 +88,7 @@ async def generuj_pdf_z_html(html_content: str):
 async def zrob_zrzut_url(url: str):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
+        # Symulacja dużej rozdzielczości ekranu
         page = await browser.new_page(viewport={"width": 1280, "height": 1080})
         try:
             await page.goto(url, timeout=15000, wait_until="load")
@@ -135,6 +106,7 @@ async def zrob_zrzut_url(url: str):
             """
             await page.evaluate(header_script)
             
+            # Pobranie całkowitych wymiarów strony, aby zrobić 1 długi zrzut
             wymiary = await page.evaluate("""() => {
                 return {
                     width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth, 1280),
@@ -163,18 +135,24 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
     try:
         with st.spinner("1/3 Rozpoznawanie danych firmy..."):
             parse_prompt = f"""
-            Wyodrębnij z poniższego tekstu dane firmy. Zwróć TYLKO czysty obiekt JSON (bez markdown) o strukturze:
+            Wyodrębnij z poniższego tekstu dane firmy.
+            Zwróć TYLKO czysty obiekt JSON (bez znaczników markdown) o strukturze:
             {{"nazwa": "...", "adres": "...", "kraj": "...", "nip": "..."}}
             Tekst: {wklejony_tekst}
             """
             parse_resp = model.generate_content(parse_prompt)
+            
             czysty_json = re.search(r'\{.*\}', parse_resp.text, re.DOTALL)
-            dane = json.loads(czysty_json.group(0)) if czysty_json else {"nazwa": wklejony_tekst[:30], "adres": "", "kraj": "", "nip": ""}
+            if czysty_json:
+                dane = json.loads(czysty_json.group(0))
+            else:
+                dane = {"nazwa": wklejony_tekst[:30], "adres": "", "kraj": "", "nip": ""}
 
             nazwa = dane.get("nazwa", "")
             adres = dane.get("adres", "")
             kraj = dane.get("kraj", "")
             nip = dane.get("nip", "")
+
             st.info(f"**Rozpoznano:** {nazwa} | **Kraj:** {kraj} | **NIP:** {nip}")
 
         pdf_wynik = None
@@ -186,7 +164,7 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
         sukces_vies = False
 
         if czy_ue and nip:
-            with st.spinner("2/3 Weryfikacja NIP w bazach (UE / VATComply)..."):
+            with st.spinner("2/3 Błyskawiczne odpytywanie bazy VIES..."):
                 nip_clean = re.sub(r'[^0-9A-Za-z]', '', nip)
                 match_prefix = re.search(r'^([A-Za-z]{2})', nip_clean)
                 
@@ -194,46 +172,58 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
                     kraj_kod = match_prefix.group(1).upper()
                     nip_clean = nip_clean[2:]
                 else:
-                    kraj_kod = {"francja": "FR", "niemcy": "DE", "polska": "PL", "wlochy": "IT", "hiszpania": "ES"}.get(kraj.lower(), "FR")
+                    mapa_krajow = {"francja": "FR", "niemcy": "DE", "polska": "PL", "wlochy": "IT", "hiszpania": "ES"}
+                    kraj_kod = mapa_krajow.get(kraj.lower(), "FR")
 
-                # Próba 1: API Oficjalne
+                url_vies_api = "https://ec.europa.eu/taxation_customs/vies/rest-api/check-vat-number"
                 try:
-                    url_vies = "https://ec.europa.eu/taxation_customs/vies/rest-api/check-vat-number"
-                    resp1 = requests.post(url_vies, json={"countryCode": kraj_kod, "vatNumber": nip_clean}, timeout=8)
-                    if resp1.status_code == 200 and resp1.json().get("valid"):
-                        vies_dane = resp1.json()
+                    resp = requests.post(url_vies_api, json={"countryCode": kraj_kod, "vatNumber": nip_clean}, timeout=10)
+                    vies_dane = resp.json()
+                    
+                    if vies_dane.get("valid"):
                         sukces_vies = True
                         zrodlo_url = "Oficjalna Baza API Komisji Europejskiej (VIES)"
-                        nazwa_z_bazy = vies_dane.get('name') or "Brak udostępnionych danych"
-                        adres_z_bazy = vies_dane.get('address') or "Brak udostępnionych danych"
-                        surowy_tekst = f"Nazwa: {nazwa_z_bazy}. Adres: {adres_z_bazy}."
-                        html_vies = generuj_html_vies(kraj_kod, nip_clean, nazwa_z_bazy, adres_z_bazy, zrodlo_url)
+                        surowy_tekst = f"Nazwa: {vies_dane.get('name')}. Adres: {vies_dane.get('address')}."
+                        
+                        html_vies = f"""
+                        <div style="font-family: Arial, sans-serif; padding: 40px; color: #333;">
+                            <h2 style="color: #1e3a8a;">Oficjalne Potwierdzenie VIES (Komisja Europejska)</h2>
+                            <hr>
+                            <p><b>Data weryfikacji:</b> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+                            <p><b>Identyfikator zapytania:</b> {vies_dane.get('requestIdentifier', 'Brak (zapytanie anonimowe)')}</p>
+                            <br>
+                            <h3 style="color: green;">STATUS: AKTYWNY (VALID)</h3>
+                            <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+                                <tr style="border-bottom: 1px solid #ccc;">
+                                    <td style="padding: 10px 0; width: 30%;"><b>Kraj:</b></td>
+                                    <td style="padding: 10px 0;">{vies_dane.get('countryCode')}</td>
+                                </tr>
+                                <tr style="border-bottom: 1px solid #ccc;">
+                                    <td style="padding: 10px 0;"><b>Numer VAT:</b></td>
+                                    <td style="padding: 10px 0;">{vies_dane.get('vatNumber')}</td>
+                                </tr>
+                                <tr style="border-bottom: 1px solid #ccc;">
+                                    <td style="padding: 10px 0;"><b>Zarejestrowana Nazwa:</b></td>
+                                    <td style="padding: 10px 0;">{vies_dane.get('name', 'Brak danych')}</td>
+                                </tr>
+                                <tr style="border-bottom: 1px solid #ccc;">
+                                    <td style="padding: 10px 0;"><b>Zarejestrowany Adres:</b></td>
+                                    <td style="padding: 10px 0;">{vies_dane.get('address', 'Brak danych')}</td>
+                                </tr>
+                            </table>
+                        </div>
+                        """
                         pdf_wynik = asyncio.run(generuj_pdf_z_html(html_vies))
                 except Exception as e:
                     pass
 
-                # Próba 2: VATComply (jeśli pierwsza zawiodła)
-                if not sukces_vies:
-                    try:
-                        url_vat = f"https://api.vatcomply.com/vat?vat_number={kraj_kod}{nip_clean}"
-                        resp2 = requests.get(url_vat, timeout=8)
-                        if resp2.status_code == 200 and resp2.json().get("valid"):
-                            vies_dane = resp2.json()
-                            sukces_vies = True
-                            zrodlo_url = "Baza VIES (przez darmowe API VATComply)"
-                            nazwa_z_bazy = vies_dane.get('name') or "Brak udostępnionych danych"
-                            adres_z_bazy = vies_dane.get('address') or "Brak udostępnionych danych"
-                            surowy_tekst = f"Nazwa: {nazwa_z_bazy}. Adres: {adres_z_bazy}."
-                            html_vies = generuj_html_vies(kraj_kod, nip_clean, nazwa_z_bazy, adres_z_bazy, zrodlo_url)
-                            pdf_wynik = asyncio.run(generuj_pdf_z_html(html_vies))
-                        else:
-                            st.warning(f"⚠️ VIES/VATComply odrzuciło numer {kraj_kod}{nip_clean}. Prawdopodobna przyczyna: numer jest nieważny, usługa UE ma awarię lub jest to błędny format.")
-                    except Exception as e:
-                        st.warning(f"⚠️ Obie bramki VIES zawiodły. Przechodzę do wyszukiwarki. Szczegóły błędu: {e}")
-
         if not sukces_vies:
-            with st.spinner("Szukanie na oficjalnej stronie firmy..."):
-                search_prompt = f"Podaj bezpośredni adres URL strony głównej lub podstrony prawnej (Impressum/Legal/Contact/Terms) dla firmy: {nazwa}, {adres}, {kraj}. Zwróć TYLKO adres URL."
+            with st.spinner("2/3 Szukanie w rejestrach lub na oficjalnej stronie firmy..."):
+                search_prompt = f"""
+                Podaj bezpośredni adres URL strony głównej lub podstrony prawnej (Impressum/Legal/Contact/Terms) dla firmy:
+                Nazwa: {nazwa}, Adres: {adres}, Kraj: {kraj}, Tax ID: {nip}.
+                Zwróć TYLKO bezpośredni adres URL.
+                """
                 search_resp = model.generate_content(search_prompt)
                 match = re.search(r'https?://[^\s)"]+', search_resp.text)
                 if match:
@@ -245,30 +235,55 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
 
         with st.spinner("3/3 Przygotowanie raportu..."):
             eval_prompt = f"""
-            Porównaj dane:
+            Porównaj dane użytkownika z tekstem pobranym ze źródła.
             Użytkownik: {nazwa}, {adres}, NIP: {nip}
             Źródło ({zrodlo_url}): {surowy_tekst[:5000]}
-            Zwróć TYLKO JSON: {{"status": "ZIELONY / NIEBIESKI / ZOLTY / CZERWONY", "znaleziona_nazwa": "...", "znaleziony_adres": "...", "znaleziony_nip": "...", "komunikat_roznice": "...", "opis_zrodla": "..."}}
+
+            Zwróć TYLKO czysty obiekt JSON (bez znaczników markdown):
+            {{
+                "status": "ZIELONY / NIEBIESKI / ZOLTY / CZERWONY",
+                "znaleziona_nazwa": "...",
+                "znaleziony_adres": "...",
+                "znaleziony_nip": "...",
+                "komunikat_roznice": "krótki opis różnic",
+                "opis_zrodla": "opis i wiarygodność",
+                "cytat_oryginalny": "fragment w języku obcym",
+                "cytat_tlumaczenie": "tłumaczenie"
+            }}
+            Reguły: ZIELONY (100% zgodności), NIEBIESKI (pełna zgodność, drobne literówki/różnice w zapisie spółki), ZOLTY (częściowe dane), CZERWONY (brak potwierdzenia).
             """
             eval_resp = model.generate_content(eval_prompt)
+            
             wynik_json = re.search(r'\{.*\}', eval_resp.text, re.DOTALL)
-            raport = json.loads(wynik_json.group(0)) if wynik_json else {"status": "CZERWONY", "opis_zrodla": zrodlo_url, "komunikat_roznice": "Błąd interpretacji wyników."}
+            if wynik_json:
+                raport = json.loads(wynik_json.group(0))
+            else:
+                raport = {"status": "CZERWONY", "opis_zrodla": zrodlo_url, "komunikat_roznice": "Błąd interpretacji wyników."}
 
         st.markdown("---")
         st.subheader("📊 Wynik Weryfikacji")
 
         status_str = raport.get("status", "CZERWONY")
-        kolor_map = {"ZIELONY": ("🟢 PEŁNA ZGODNOŚĆ (100%)", "success"), "NIEBIESKI": ("🔵 PEŁNA ZGODNOŚĆ (Drobne różnice w zapisie)", "info"), "ZOLTY": ("🟡 CZĘŚCIOWA ZGODNOŚĆ (Braki w danych)", "warning"), "CZERWONY": ("🔴 BRAK POTWIERDZENIA", "error")}
+        kolor_map = {
+            "ZIELONY": ("🟢 PEŁNA ZGODNOŚĆ (100%)", "success"),
+            "NIEBIESKI": ("🔵 PEŁNA ZGODNOŚĆ (Drobne różnice w zapisie)", "info"),
+            "ZOLTY": ("🟡 CZĘŚCIOWA ZGODNOŚĆ (Braki w danych)", "warning"),
+            "CZERWONY": ("🔴 BRAK POTWIERDZENIA", "error")
+        }
         etykieta, typ_alertu = kolor_map.get(status_str, ("🔴 BRAK POTWIERDZENIA", "error"))
         getattr(st, typ_alertu)(f"**Status:** {etykieta}")
 
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("### 📋 Dane wklejone")
-            st.write(f"**Nazwa:** {nazwa}\n**Adres:** {adres}\n**NIP / Tax ID:** {nip}")
+            st.write(f"**Nazwa:** {nazwa}")
+            st.write(f"**Adres:** {adres}")
+            st.write(f"**NIP / Tax ID:** {nip}")
         with col2:
             st.markdown("### 🔎 Dane odnalezione")
-            st.write(f"**Nazwa:** {raport.get('znaleziona_nazwa', '-')}\n**Adres:** {raport.get('znaleziony_adres', '-')}\n**NIP / Tax ID:** {raport.get('znaleziony_nip', '-')}")
+            st.write(f"**Nazwa:** {raport.get('znaleziona_nazwa', '-')}")
+            st.write(f"**Adres:** {raport.get('znaleziony_adres', '-')}")
+            st.write(f"**NIP / Tax ID:** {raport.get('znaleziony_nip', '-')}")
 
         if raport.get("komunikat_roznice"):
             st.info(f"**Uwagi:** {raport.get('komunikat_roznice')}")
@@ -280,7 +295,12 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
 
         if pdf_wynik:
             st.markdown("### 📥 Plik dowodowy")
-            st.download_button(label=f"⬇️ Pobierz potwierdzenie PDF ({nazwa_pliku})", data=pdf_wynik, file_name=nazwa_pliku, mime="application/pdf")
+            st.download_button(
+                label=f"⬇️ Pobierz potwierdzenie PDF ({nazwa_pliku})",
+                data=pdf_wynik,
+                file_name=nazwa_pliku,
+                mime="application/pdf"
+            )
 
     except Exception as err:
         st.error(f"Wystąpił błąd: {str(err)}")
