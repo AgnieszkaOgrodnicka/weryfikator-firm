@@ -162,7 +162,7 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
         sukces_vies = False
 
         if czy_ue and nip:
-            with st.spinner("2/3 Błyskawiczne odpytywanie bazy VIES..."):
+            with st.spinner("2/3 Weryfikacja NIP przez darmowe API..."):
                 nip_clean = re.sub(r'[^0-9A-Za-z]', '', nip)
                 match_prefix = re.search(r'^([A-Za-z]{2})', nip_clean)
                 
@@ -173,27 +173,26 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
                     mapa_krajow = {"francja": "FR", "niemcy": "DE", "polska": "PL", "wlochy": "IT", "hiszpania": "ES"}
                     kraj_kod = mapa_krajow.get(kraj.lower(), "FR")
 
-                # Używamy zaktualizowanego endpointu GET i nagłówka udającego zwykłą przeglądarkę
-                url_vies_api = f"https://ec.europa.eu/taxation_customs/vies/rest-api/ms/{kraj_kod}/vat/{nip_clean}"
+                # Nowe podejście: Zewnętrzny darmowy pośrednik VATComply (omija blokady chmury)
+                url_api = f"https://api.vatcomply.com/vat?vat_number={kraj_kod}{nip_clean}"
                 try:
-                    naglowki = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-                    resp = requests.get(url_vies_api, headers=naglowki, timeout=10)
-                    
+                    resp = requests.get(url_api, timeout=10)
                     if resp.status_code == 200:
                         vies_dane = resp.json()
                         
-                        # VIES zwraca klucz 'isValid' dla poprawnych numerów
-                        if vies_dane.get("isValid") == True:
+                        if vies_dane.get("valid"):
                             sukces_vies = True
-                            zrodlo_url = "Oficjalna Baza API Komisji Europejskiej (VIES)"
-                            surowy_tekst = f"Nazwa: {vies_dane.get('name')}. Adres: {vies_dane.get('address')}."
+                            zrodlo_url = "Baza VIES (przez API VATComply)"
+                            
+                            nazwa_z_bazy = vies_dane.get('name') or "Brak udostępnionych danych"
+                            adres_z_bazy = vies_dane.get('address') or "Brak udostępnionych danych"
+                            surowy_tekst = f"Nazwa: {nazwa_z_bazy}. Adres: {adres_z_bazy}."
                             
                             html_vies = f"""
                             <div style="font-family: Arial, sans-serif; padding: 40px; color: #333;">
-                                <h2 style="color: #1e3a8a;">Oficjalne Potwierdzenie VIES (Komisja Europejska)</h2>
+                                <h2 style="color: #1e3a8a;">Potwierdzenie Aktywności VAT (UE)</h2>
                                 <hr>
                                 <p><b>Data weryfikacji:</b> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
-                                <p><b>Identyfikator zapytania:</b> {vies_dane.get('requestIdentifier', 'Brak (zapytanie anonimowe)')}</p>
                                 <br>
                                 <h3 style="color: green;">STATUS: AKTYWNY (VALID)</h3>
                                 <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
@@ -207,11 +206,11 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
                                     </tr>
                                     <tr style="border-bottom: 1px solid #ccc;">
                                         <td style="padding: 10px 0;"><b>Zarejestrowana Nazwa:</b></td>
-                                        <td style="padding: 10px 0;">{vies_dane.get('name', 'Brak udostępnionych danych')}</td>
+                                        <td style="padding: 10px 0;">{nazwa_z_bazy}</td>
                                     </tr>
                                     <tr style="border-bottom: 1px solid #ccc;">
                                         <td style="padding: 10px 0;"><b>Zarejestrowany Adres:</b></td>
-                                        <td style="padding: 10px 0;">{vies_dane.get('address', 'Brak udostępnionych danych')}</td>
+                                        <td style="padding: 10px 0;">{adres_z_bazy}</td>
                                     </tr>
                                 </table>
                             </div>
@@ -221,7 +220,7 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
                     pass
 
         if not sukces_vies:
-            with st.spinner("2/3 Szukanie w rejestrach lub na oficjalnej stronie firmy..."):
+            with st.spinner("2/3 Szukanie na oficjalnej stronie firmy..."):
                 search_prompt = f"""
                 Podaj bezpośredni adres URL strony głównej lub podstrony prawnej (Impressum/Legal/Contact/Terms) dla firmy:
                 Nazwa: {nazwa}, Adres: {adres}, Kraj: {kraj}, Tax ID: {nip}.
