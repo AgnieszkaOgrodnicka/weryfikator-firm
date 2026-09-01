@@ -65,7 +65,12 @@ if not api_key:
 
 # Konfiguracja Gemini API
 genai.configure(api_key=api_key)
-model = genai.GenerativeModel("gemini-1.5-flash-latest")
+try:
+    dostepne_modele = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+    wybrany_model = "models/gemini-1.5-flash" if "models/gemini-1.5-flash" in dostepne_modele else dostepne_modele[0]
+    model = genai.GenerativeModel(wybrany_model)
+except Exception:
+    model = genai.GenerativeModel("gemini-1.5-flash")
 
 wklejony_tekst = st.text_area(
     "Wklej dane kontrahenta (Nazwa, Adres, Kraj, NIP/Tax ID):",
