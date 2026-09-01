@@ -88,7 +88,6 @@ async def generuj_pdf_z_html(html_content: str):
 async def zrob_zrzut_url(url: str):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        # Symulacja dużej rozdzielczości ekranu
         page = await browser.new_page(viewport={"width": 1280, "height": 1080})
         try:
             await page.goto(url, timeout=15000, wait_until="load")
@@ -106,7 +105,6 @@ async def zrob_zrzut_url(url: str):
             """
             await page.evaluate(header_script)
             
-            # Pobranie całkowitych wymiarów strony, aby zrobić 1 długi zrzut
             wymiary = await page.evaluate("""() => {
                 return {
                     width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth, 1280),
@@ -175,45 +173,50 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
                     mapa_krajow = {"francja": "FR", "niemcy": "DE", "polska": "PL", "wlochy": "IT", "hiszpania": "ES"}
                     kraj_kod = mapa_krajow.get(kraj.lower(), "FR")
 
-                url_vies_api = "https://ec.europa.eu/taxation_customs/vies/rest-api/check-vat-number"
+                # Używamy zaktualizowanego endpointu GET i nagłówka udającego zwykłą przeglądarkę
+                url_vies_api = f"https://ec.europa.eu/taxation_customs/vies/rest-api/ms/{kraj_kod}/vat/{nip_clean}"
                 try:
-                    resp = requests.post(url_vies_api, json={"countryCode": kraj_kod, "vatNumber": nip_clean}, timeout=10)
-                    vies_dane = resp.json()
+                    naglowki = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                    resp = requests.get(url_vies_api, headers=naglowki, timeout=10)
                     
-                    if vies_dane.get("valid"):
-                        sukces_vies = True
-                        zrodlo_url = "Oficjalna Baza API Komisji Europejskiej (VIES)"
-                        surowy_tekst = f"Nazwa: {vies_dane.get('name')}. Adres: {vies_dane.get('address')}."
+                    if resp.status_code == 200:
+                        vies_dane = resp.json()
                         
-                        html_vies = f"""
-                        <div style="font-family: Arial, sans-serif; padding: 40px; color: #333;">
-                            <h2 style="color: #1e3a8a;">Oficjalne Potwierdzenie VIES (Komisja Europejska)</h2>
-                            <hr>
-                            <p><b>Data weryfikacji:</b> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
-                            <p><b>Identyfikator zapytania:</b> {vies_dane.get('requestIdentifier', 'Brak (zapytanie anonimowe)')}</p>
-                            <br>
-                            <h3 style="color: green;">STATUS: AKTYWNY (VALID)</h3>
-                            <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
-                                <tr style="border-bottom: 1px solid #ccc;">
-                                    <td style="padding: 10px 0; width: 30%;"><b>Kraj:</b></td>
-                                    <td style="padding: 10px 0;">{vies_dane.get('countryCode')}</td>
-                                </tr>
-                                <tr style="border-bottom: 1px solid #ccc;">
-                                    <td style="padding: 10px 0;"><b>Numer VAT:</b></td>
-                                    <td style="padding: 10px 0;">{vies_dane.get('vatNumber')}</td>
-                                </tr>
-                                <tr style="border-bottom: 1px solid #ccc;">
-                                    <td style="padding: 10px 0;"><b>Zarejestrowana Nazwa:</b></td>
-                                    <td style="padding: 10px 0;">{vies_dane.get('name', 'Brak danych')}</td>
-                                </tr>
-                                <tr style="border-bottom: 1px solid #ccc;">
-                                    <td style="padding: 10px 0;"><b>Zarejestrowany Adres:</b></td>
-                                    <td style="padding: 10px 0;">{vies_dane.get('address', 'Brak danych')}</td>
-                                </tr>
-                            </table>
-                        </div>
-                        """
-                        pdf_wynik = asyncio.run(generuj_pdf_z_html(html_vies))
+                        # VIES zwraca klucz 'isValid' dla poprawnych numerów
+                        if vies_dane.get("isValid") == True:
+                            sukces_vies = True
+                            zrodlo_url = "Oficjalna Baza API Komisji Europejskiej (VIES)"
+                            surowy_tekst = f"Nazwa: {vies_dane.get('name')}. Adres: {vies_dane.get('address')}."
+                            
+                            html_vies = f"""
+                            <div style="font-family: Arial, sans-serif; padding: 40px; color: #333;">
+                                <h2 style="color: #1e3a8a;">Oficjalne Potwierdzenie VIES (Komisja Europejska)</h2>
+                                <hr>
+                                <p><b>Data weryfikacji:</b> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+                                <p><b>Identyfikator zapytania:</b> {vies_dane.get('requestIdentifier', 'Brak (zapytanie anonimowe)')}</p>
+                                <br>
+                                <h3 style="color: green;">STATUS: AKTYWNY (VALID)</h3>
+                                <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+                                    <tr style="border-bottom: 1px solid #ccc;">
+                                        <td style="padding: 10px 0; width: 30%;"><b>Kraj:</b></td>
+                                        <td style="padding: 10px 0;">{kraj_kod}</td>
+                                    </tr>
+                                    <tr style="border-bottom: 1px solid #ccc;">
+                                        <td style="padding: 10px 0;"><b>Numer VAT:</b></td>
+                                        <td style="padding: 10px 0;">{nip_clean}</td>
+                                    </tr>
+                                    <tr style="border-bottom: 1px solid #ccc;">
+                                        <td style="padding: 10px 0;"><b>Zarejestrowana Nazwa:</b></td>
+                                        <td style="padding: 10px 0;">{vies_dane.get('name', 'Brak udostępnionych danych')}</td>
+                                    </tr>
+                                    <tr style="border-bottom: 1px solid #ccc;">
+                                        <td style="padding: 10px 0;"><b>Zarejestrowany Adres:</b></td>
+                                        <td style="padding: 10px 0;">{vies_dane.get('address', 'Brak udostępnionych danych')}</td>
+                                    </tr>
+                                </table>
+                            </div>
+                            """
+                            pdf_wynik = asyncio.run(generuj_pdf_z_html(html_vies))
                 except Exception as e:
                     pass
 
