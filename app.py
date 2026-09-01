@@ -97,7 +97,8 @@ if not api_key:
 
 genai.configure(api_key=api_key)
 # Zmiana modelu na wersję z limitem 1500 zapytań dziennie
-model = genai.GenerativeModel("gemini-1.0-pro")
+dostepne_modele = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+model = genai.GenerativeModel(dostepne_modele[0])
 
 wklejony_tekst = st.text_area(
     "Wklej dane kontrahenta (Nazwa, Adres, Kraj, NIP/Tax ID):",
