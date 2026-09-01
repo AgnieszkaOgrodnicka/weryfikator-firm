@@ -2,28 +2,24 @@ import streamlit as st
 import asyncio
 import os
 import re
+import json
 from datetime import datetime
 from google import genai
 from google.genai import types
 from playwright.async_api import async_playwright
-from pydantic import BaseModel, Field
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(page_title="Weryfikator Kontrahentów", page_icon="🔍", layout="wide")
 
-# --- SŁOWNIK PRIORYTETOWYCH REJESTRÓW (MOŻESZ TU DOPISYWAĆ KRAJE) ---
+# Słownik rejestrów krajowych (możesz dopisywać kraje)
 REJESTRY_KRAJOWE = {
     "Wielka Brytania": "https://find-and-update.company-information.service.gov.uk/",
     "UK": "https://find-and-update.company-information.service.gov.uk/",
     "Niemcy": "https://www.handelsregister.de/",
     "Szwajcaria": "https://www.zefix.ch/en/search/entity/welcome",
-    "USA": "https://opencorporates.com/", # Domyślna otwarta baza ogólnoamerykańska
-    # Tutaj możesz dopisywać kolejne kraje:
-    # "Norwegia": "https://www.brreg.no/",
-    # "Francja": "https://data.inpi.fr/",
+    "USA": "https://opencorporates.com/",
 }
 
-# Kraje UE obsługiwane przez VIES
 KRAJE_UE = [
     "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "EL", "GR", "ES", "FI", 
     "FR", "HR", "HU", "IE", "IT", "LT", "LU", "LV", "MT", "NL", "PL", "PT", "RO", "SE", "SK",
@@ -32,30 +28,12 @@ KRAJE_UE = [
     "Włochy", "Litwa", "Luksemburg", "Łotwa", "Malta", "Holandia", "Polska", "Portugalia", "Rumunia", "Szwecja", "Słowacja"
 ]
 
-# --- STRUKTURA DANYCH DLA AI ---
-class ParsedCompanyData(BaseModel):
-    nazwa: str = Field(description="Nazwa firmy")
-    adres: str = Field(description="Adres firmy (ulica, kod, miasto)")
-    kraj: str = Field(description="Kraj siedziby firmy")
-    nip: str = Field(description="Numer NIP/Tax ID/VAT/EIN (z prefiksem lub bez)")
-
-class VerificationResult(BaseModel):
-    status: str = Field(description="Jeden z: 'ZIELONY', 'NIEBIESKI', 'ZOLTY', 'CZERWONY'")
-    znaleziona_nazwa: str = Field(description="Nazwa odnaleziona w źródle")
-    znaleziony_adres: str = Field(description="Adres odnaleziony w źródle")
-    znaleziony_nip: str = Field(description="NIP/Tax ID odnaleziony w źródle")
-    komunikat_roznice: str = Field(description="Opis drobnych różnic w zapisie (dla NIEBIESKIEGO) lub braków (dla ZOLTEGO)")
-    opis_zrodla: str = Field(description="Krótkie wyjaśnienie co to za strona i jej poziom wiarygodności")
-    cytat_oryginalny: str = Field(description="Oryginalny tekst ze strony w obcym języku")
-    cytat_tlumaczenie: str = Field(description="Tłumaczenie cytatu na język polski")
-
-# --- FUNKCJE POMOCNICZE ---
 def format_filename(nazwa_firmy: str) -> str:
     czysta_nazwa = re.sub(r'[^a-zA-Z0-9_-]', '_', nazwa_firmy).strip('_')
     data_dzis = datetime.now().strftime("%Y-%m-%d")
     return f"{czysta_nazwa}_{data_dzis}.pdf"
 
-# --- SPRAWDZANIE HASŁA ---
+# --- LOGOWANIE ---
 def check_password():
     app_password = st.secrets.get("APP_PASSWORD", "admin123")
     if "authenticated" not in st.session_state:
@@ -76,21 +54,26 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- GŁÓWNY INTERFEJS ---
+# --- INTERFEJS GŁÓWNY ---
 st.title("🔍 Automatyczny Weryfikator Kontrahentów")
-st.caption("Trójstopniowa weryfikacja: VIES ➔ Bazy państwowe / komercyjne ➔ Strona zleceniodawcy")
+st.caption("VIES ➔ Bazy państwowe / komercyjne ➔ Strona zleceniodawcy")
 
-api_key = st.secrets.get("GEMINI_API_KEY", "")
-client = genai.Client(api_key=api_key) if api_key else None
+api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
+
+if not api_key:
+    st.error("⚠️ Brak klucza GEMINI_API_KEY w Secrets! Dodaj go w ustawieniach Streamlit Settings -> Secrets.")
+    st.stop()
+
+client = genai.Client(api_key=api_key)
 
 wklejony_tekst = st.text_area(
-    "Wklej dane kontrahenta (Nazwa, Adres, Kraj, NIP/Tax ID w dowolnym formacie):",
-    height=150,
+    "Wklej dane kontrahenta (Nazwa, Adres, Kraj, NIP/Tax ID):",
+    height=140,
     placeholder="Przykład:\nAcme Global Ltd\n123 Business Road, London, EC1A 1BB\nUnited Kingdom\nVAT: GB123456789"
 )
 
-# --- ASYNCHRONICZNA OBSŁUGA PRZEGLĄDARKI ---
-async def weryfikuj_w_vies(kraj_kod: str, nip_clean: str, nazwa_pliku: str):
+# --- OBSŁUGA PRZEGLĄDARKI ---
+async def weryfikuj_w_vies(kraj_kod: str, nip_clean: str):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
@@ -100,9 +83,8 @@ async def weryfikuj_w_vies(kraj_kod: str, nip_clean: str, nazwa_pliku: str):
             await page.select_option("#select-country", kraj_kod)
             await page.fill("#vat-number", nip_clean)
             await page.click("button[type='submit']")
-            await page.wait_for_timeout(4000) # Czas na odpowiedź serwera VIES
+            await page.wait_for_timeout(4000)
             
-            # Pobranie PDF z widoku strony
             pdf_bytes = await page.pdf(format="A4", print_background=True)
             text_content = await page.inner_text("body")
             await browser.close()
@@ -111,13 +93,12 @@ async def weryfikuj_w_vies(kraj_kod: str, nip_clean: str, nazwa_pliku: str):
             await browser.close()
             return None, str(e), None
 
-async def zrob_zrzut_url(url: str, nazwa_pliku: str):
+async def zrob_zrzut_url(url: str):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         try:
             await page.goto(url, timeout=30000, wait_until="networkidle")
-            # Dodanie paska ze stemplem czasu u góry
             czas_teraz = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             header_script = f"""
             const div = document.createElement('div');
@@ -143,135 +124,174 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
     if not wklejony_tekst.strip():
         st.warning("Proszę wkleić dane firmy!")
         st.stop()
-    if not api_key:
-        st.error("Brak skonfigurowanego klucza GEMINI_API_KEY w Secrets!")
-        st.stop()
 
-    with st.spinner("1/3 Parsowanie danych wejściowych..."):
-        parse_prompt = f"Wyodrębnij dane firmy z tekstu: {wklejony_tekst}"
-        parse_resp = client.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=parse_prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=ParsedCompanyData
-            )
-        )
-        dane_firmy = ParsedCompanyData.model_validate_json(parse_resp.text)
-        
-        st.info(f"**Rozpoznano:** {dane_firmy.nazwa} | **Kraj:** {dane_firmy.kraj} | **NIP/Tax ID:** {dane_firmy.nip}")
+    try:
+        # Krok 1: Parsowanie tekstu
+        with st.spinner("1/3 Rozpoznawanie danych firmy..."):
+            parse_prompt = f"""
+            Wyodrębnij z poniższego tekstu dane firmy.
+            Zwróć TYLKO czysty obiekt JSON (bez znaczników markdown) o strukturze:
+            {{"nazwa": "...", "adres": "...", "kraj": "...", "nip": "..."}}
 
-    pdf_wynik = None
-    zrodlo_url = ""
-    surowy_tekst = ""
-    nazwa_pliku = format_filename(dane_firmy.nazwa)
-
-    # KROK 1: VIES (dla krajów UE)
-    czy_ue = any(k.lower() in dane_firmy.kraj.lower() for k in KRAJE_UE)
-    sukces_krok1 = False
-
-    if czy_ue:
-        with st.spinner("2/3 Sprawdzanie w rejestrze VIES..."):
-            nip_clean = re.sub(r'^[A-Z]{2}', '', dane_firmy.nip.strip())
-            kraj_kod = dane_firmy.nip[:2].upper() if len(dane_firmy.nip) > 2 and dane_firmy.nip[:2].isalpha() else "DE"
-            pdf_bytes, raw_txt, url_vies = asyncio.run(weryfikuj_w_vies(kraj_kod, nip_clean, nazwa_pliku))
-            
-            if pdf_bytes and "valid" in raw_txt.lower() or "ważny" in raw_txt.lower() or "valide" in raw_txt.lower():
-                pdf_wynik = pdf_bytes
-                surowy_tekst = raw_txt
-                zrodlo_url = url_vies
-                sukces_krok1 = True
-
-    # KROK 2 & 3: Wyszukiwanie rejestrów / strony www przez AI Search
-    if not sukces_krok1:
-        with st.spinner("2/3 Szukanie w rejestrach krajowych lub na oficjalnej stronie firmy..."):
-            search_query = f"Official business registry or company website imprint terms contact for: {dane_firmy.nazwa}, {dane_firmy.kraj}, Tax ID: {dane_firmy.nip}"
-            search_resp = client.models.generate_content(
+            Tekst:
+            {wklejony_tekst}
+            """
+            parse_resp = client.models.generate_content(
                 model='gemini-1.5-flash',
-                contents=f"Find the direct URL for legal imprint, company registry or terms of service page with company details for: {search_query}. Return ONLY the direct URL.",
-                config=types.GenerateContentConfig(
-                    tools=[{"google_search": {}}]
-                )
+                contents=parse_prompt
             )
-            znaleziony_url = search_resp.text.strip().replace("`", "")
-            match = re.search(r'https?://[^\s]+', znaleziony_url)
-            if match:
-                zrodlo_url = match.group(0)
-                pdf_bytes, raw_txt = asyncio.run(zrob_zrzut_url(zrodlo_url, nazwa_pliku))
-                if pdf_bytes:
+            
+            czysty_json = re.search(r'\{.*\}', parse_resp.text, re.DOTALL)
+            if czysty_json:
+                dane = json.loads(czysty_json.group(0))
+            else:
+                dane = {"nazwa": wklejony_tekst[:30], "adres": "", "kraj": "", "nip": ""}
+
+            nazwa = dane.get("nazwa", "")
+            adres = dane.get("adres", "")
+            kraj = dane.get("kraj", "")
+            nip = dane.get("nip", "")
+
+            st.info(f"**Rozpoznano:** {nazwa} | **Kraj:** {kraj} | **NIP/Tax ID:** {nip}")
+
+        pdf_wynik = None
+        zrodlo_url = ""
+        surowy_tekst = ""
+        nazwa_pliku = format_filename(nazwa)
+
+        # Krok 2: Sprawdzenie w VIES
+        czy_ue = any(k.lower() in kraj.lower() for k in KRAJE_UE)
+        sukces_vies = False
+
+        if czy_ue and nip:
+            with st.spinner("2/3 Sprawdzanie w rejestrze VIES..."):
+                nip_clean = re.sub(r'^[A-Z]{2}', '', nip.strip())
+                kraj_kod = nip[:2].upper() if len(nip) > 2 and nip[:2].isalpha() else "DE"
+                pdf_bytes, raw_txt, url_vies = asyncio.run(weryfikuj_w_vies(kraj_kod, nip_clean))
+                
+                if pdf_bytes and ("valid" in raw_txt.lower() or "ważny" in raw_txt.lower() or "valide" in raw_txt.lower()):
                     pdf_wynik = pdf_bytes
                     surowy_tekst = raw_txt
+                    zrodlo_url = url_vies
+                    sukces_vies = True
 
-    # KROK 4: Analiza zgodności danych przez AI
-    with st.spinner("3/3 Generowanie raportu wiarygodności..."):
-        eval_prompt = f"""
-        Dane wklejone przez użytkownika:
-        - Nazwa: {dane_firmy.nazwa}
-        - Adres: {dane_firmy.adres}
-        - NIP: {dane_firmy.nip}
+        # Krok 3: Rejestry krajowe / Strona WWW
+        if not sukces_vies:
+            with st.spinner("2/3 Szukanie w rejestrach lub na oficjalnej stronie firmy..."):
+                search_prompt = f"""
+                Znajdź bezpośredni adres URL do oficjalnego rejestru firm w kraju: {kraj} lub oficjalnej strony firmy {nazwa} (podstrona Impressum / Legal / Contact / Terms).
+                Dane podmiotu: {nazwa}, {adres}, Tax ID: {nip}.
+                Zwróć TYLKO jeden bezpośredni link URL zaczynający się od http:// lub https://.
+                """
+                search_resp = client.models.generate_content(
+                    model='gemini-1.5-flash',
+                    contents=search_prompt
+                )
+                match = re.search(r'https?://[^\s)"]+', search_resp.text)
+                if match:
+                    zrodlo_url = match.group(0)
+                    pdf_bytes, raw_txt = asyncio.run(zrob_zrzut_url(zrodlo_url))
+                    if pdf_bytes:
+                        pdf_wynik = pdf_bytes
+                        surowy_tekst = raw_txt
 
-        Treść odnaleziona na stronie ({zrodlo_url}):
-        {surowy_tekst[:6000]}
+        # Krok 4: Analiza zgodności
+        with st.spinner("3/3 Przygotowanie raportu..."):
+            eval_prompt = f"""
+            Porównaj dane wklejone przez użytkownika z tekstem pobranym ze strony.
 
-        Oceń zgodność:
-        - 'ZIELONY' jeśli 100% pełna zgodność (Nazwa, Adres, NIP).
-        - 'NIEBIESKI' jeśli pełna zgodność, ale drobne różnice w zapisie (np. Sp. z o.o. vs Spółka z o.o.).
-        - 'ZOLTY' jeśli znaleziono tylko część danych (np. brak NIP).
-        - 'CZERWONY' jeśli brak zgodności lub nie znaleziono podmiotu.
-        Podaj cytat w języku obcym i jego polskie tłumaczenie. Oceń wiarygodność źródła.
-        """
-        eval_resp = client.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=eval_prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=VerificationResult
+            DANE UŻYTKOWNIKA:
+            - Nazwa: {nazwa}
+            - Adres: {adres}
+            - NIP/Tax ID: {nip}
+
+            TEKST ZE STRONY ({zrodlo_url}):
+            {surowy_tekst[:5000]}
+
+            Zwróć TYLKO czysty obiekt JSON (bez markdown) w formacie:
+            {{
+                "status": "ZIELONY / NIEBIESKI / ZOLTY / CZERWONY",
+                "znaleziona_nazwa": "...",
+                "znaleziony_adres": "...",
+                "znaleziony_nip": "...",
+                "komunikat_roznice": "krótki opis różnic lub braków",
+                "opis_zrodla": "krótki opis strony i ocena wiarygodności",
+                "cytat_oryginalny": "fragment w języku obcym",
+                "cytat_tlumaczenie": "tłumaczenie fragmentu na język polski"
+            }}
+            Reguły statusów:
+            - ZIELONY: 100% zgodności
+            - NIEBIESKI: pełna zgodność, ale drobne różnice w pisowni
+            - ZOLTY: tylko część danych (brak NIP lub inny adres)
+            - CZERWONY: brak potwierdzenia
+            """
+            eval_resp = client.models.generate_content(
+                model='gemini-1.5-flash',
+                contents=eval_prompt
             )
-        )
-        wynik = VerificationResult.model_validate_json(eval_resp.text)
+            
+            wynik_json = re.search(r'\{.*\}', eval_resp.text, re.DOTALL)
+            if wynik_json:
+                raport = json.loads(wynik_json.group(0))
+            else:
+                raport = {
+                    "status": "CZERWONY",
+                    "znaleziona_nazwa": "Brak",
+                    "znaleziony_adres": "Brak",
+                    "znaleziony_nip": "Brak",
+                    "komunikat_roznice": "Nie udało się sparsować odpowiedzi",
+                    "opis_zrodla": zrodlo_url or "Nieznane",
+                    "cytat_oryginalny": "",
+                    "cytat_tlumaczenie": ""
+                }
 
-    # --- PREZENTACJA WYNIKÓW ---
-    st.markdown("---")
-    st.subheader("📊 Wynik Weryfikacji")
+        # --- WYŚWIETLENIE RAPORTU ---
+        st.markdown("---")
+        st.subheader("📊 Wynik Weryfikacji")
 
-    kolor_map = {
-        "ZIELONY": ("🟢 PEŁNA ZGODNOŚĆ (100%)", "success"),
-        "NIEBIESKI": ("🔵 PEŁNA ZGODNOŚĆ (Drobne różnice w zapisie)", "info"),
-        "ZOLTY": ("🟡 CZĘŚCIOWA ZGODNOŚĆ (Braki w danych)", "warning"),
-        "CZERWONY": ("🔴 BRAK POTWIERDZENIA", "error")
-    }
-    etykieta, typ_alertu = kolor_map.get(wynik.status, ("⚪ NIEZNANY", "info"))
-    getattr(st, typ_alertu)(f"**Status:** {etykieta}")
+        status_str = raport.get("status", "CZERWONY")
+        kolor_map = {
+            "ZIELONY": ("🟢 PEŁNA ZGODNOŚĆ (100%)", "success"),
+            "NIEBIESKI": ("🔵 PEŁNA ZGODNOŚĆ (Drobne różnice w zapisie)", "info"),
+            "ZOLTY": ("🟡 CZĘŚCIOWA ZGODNOŚĆ (Braki w danych)", "warning"),
+            "CZERWONY": ("🔴 BRAK POTWIERDZENIA", "error")
+        }
+        etykieta, typ_alertu = kolor_map.get(status_str, ("🔴 BRAK POTWIERDZENIA", "error"))
+        getattr(st, typ_alertu)(f"**Status:** {etykieta}")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("### 📋 Dane wklejone")
-        st.write(f"**Nazwa:** {dane_firmy.nazwa}")
-        st.write(f"**Adres:** {dane_firmy.adres}")
-        st.write(f"**NIP / Tax ID:** {dane_firmy.nip}")
-    with col2:
-        st.markdown("### 🔎 Dane odnalezione w źródle")
-        st.write(f"**Nazwa:** {wynik.znaleziona_nazwa}")
-        st.write(f"**Adres:** {wynik.znaleziony_adres}")
-        st.write(f"**NIP / Tax ID:** {wynik.znaleziony_nip}")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("### 📋 Dane wklejone")
+            st.write(f"**Nazwa:** {nazwa}")
+            st.write(f"**Adres:** {adres}")
+            st.write(f"**NIP / Tax ID:** {nip}")
+        with col2:
+            st.markdown("### 🔎 Dane odnalezione")
+            st.write(f"**Nazwa:** {raport.get('znaleziona_nazwa', '-')}")
+            st.write(f"**Adres:** {raport.get('znaleziony_adres', '-')}")
+            st.write(f"**NIP / Tax ID:** {raport.get('znaleziony_nip', '-')}")
 
-    if wynik.komunikat_roznice:
-        st.info(f"**Uwagi do zgodności:** {wynik.komunikat_roznice}")
+        if raport.get("komunikat_roznice"):
+            st.info(f"**Uwagi:** {raport.get('komunikat_roznice')}")
 
-    st.markdown("### 🌐 Informacje o źródle i wiarygodności")
-    st.write(f"**Źródło:** [{zrodlo_url}]({zrodlo_url})")
-    st.write(f"**Ocena źródła:** {wynik.opis_zrodla}")
+        st.markdown("### 🌐 Informacje o źródle i wiarygodności")
+        if zrodlo_url:
+            st.write(f"**Źródło:** [{zrodlo_url}]({zrodlo_url})")
+        st.write(f"**Ocena wiarygodności:** {raport.get('opis_zrodla', '-')}")
 
-    if wynik.cytat_oryginalny:
-        with st.expander("Zobacz oryginalny fragment ze strony oraz tłumaczenie"):
-            st.write(f"**Oryginał:** {wynik.cytat_oryginalny}")
-            st.write(f"**Tłumaczenie PL:** {wynik.cytat_tlumaczenie}")
+        if raport.get("cytat_oryginalny"):
+            with st.expander("Zobacz oryginalny fragment ze strony oraz tłumaczenie"):
+                st.write(f"**Oryginał:** {raport.get('cytat_oryginalny')}")
+                st.write(f"**Tłumaczenie PL:** {raport.get('cytat_tlumaczenie')}")
 
-    if pdf_wynik:
-        st.markdown("### 📥 Plik dowodowy")
-        st.download_button(
-            label=f"⬇️ Pobierz potwierdzenie ({nazwa_pliku})",
-            data=pdf_wynik,
-            file_name=nazwa_pliku,
-            mime="application/pdf"
-        )
+        if pdf_wynik:
+            st.markdown("### 📥 Plik dowodowy")
+            st.download_button(
+                label=f"⬇️ Pobierz potwierdzenie ({nazwa_pliku})",
+                data=pdf_wynik,
+                file_name=nazwa_pliku,
+                mime="application/pdf"
+            )
+
+    except Exception as err:
+        st.error(f"Wystąpił błąd podczas weryfikacji: {str(err)}")
