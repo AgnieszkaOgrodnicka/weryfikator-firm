@@ -96,7 +96,8 @@ if not api_key:
     st.stop()
 
 genai.configure(api_key=api_key)
-model = genai.GenerativeModel("gemini-3.6-flash")
+# Używamy modelu z dużym dziennym limitem
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 wklejony_tekst = st.text_area(
     "Wklej dane kontrahenta (Nazwa, Adres, Kraj, NIP/Tax ID):",
@@ -159,20 +160,20 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
         st.stop()
 
     try:
-        with st.spinner("1/3 Rozpoznawanie danych firmy..."):
-            parse_prompt = f"""
-            Wyodrębnij z poniższego tekstu dane firmy. Zwróć TYLKO czysty obiekt JSON (bez markdown) o strukturze:
-            {{"nazwa": "...", "adres": "...", "kraj": "...", "nip": "..."}}
-            Tekst: {wklejony_tekst}
-            """
-            parse_resp = model.generate_content(parse_prompt)
-            czysty_json = re.search(r'\{.*\}', parse_resp.text, re.DOTALL)
-            dane = json.loads(czysty_json.group(0)) if czysty_json else {"nazwa": wklejony_tekst[:30], "adres": "", "kraj": "", "nip": ""}
+        # Krok 1: Tradycyjne parsowanie (bez użycia AI i limitu API)
+        with st.spinner("1/3 Rozpoznawanie danych (Oszczędzanie API)..."):
+            linie = [linia.strip() for linia in wklejony_tekst.split('\n') if linia.strip()]
+            nazwa = linie[0] if len(linie) > 0 else ""
+            adres = linie[1] if len(linie) > 1 else ""
+            kraj = linie[2] if len(linie) > 2 else ""
+            nip = ""
+            
+            nip_match = re.search(r'(?:NIP|VAT|TAX\s*ID)?[\s:]*([A-Z]{2}[0-9A-Z]{5,})', wklejony_tekst, re.IGNORECASE)
+            if nip_match:
+                nip = nip_match.group(1).upper()
+            elif len(linie) > 3:
+                nip = re.sub(r'[^0-9A-Za-z]', '', linie[3]).upper()
 
-            nazwa = dane.get("nazwa", "")
-            adres = dane.get("adres", "")
-            kraj = dane.get("kraj", "")
-            nip = dane.get("nip", "")
             st.info(f"**Rozpoznano:** {nazwa} | **Kraj:** {kraj} | **NIP:** {nip}")
 
         pdf_wynik = None
@@ -225,12 +226,12 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
                             html_vies = generuj_html_vies(kraj_kod, nip_clean, nazwa_z_bazy, adres_z_bazy, zrodlo_url)
                             pdf_wynik = asyncio.run(generuj_pdf_z_html(html_vies))
                         else:
-                            st.warning(f"⚠️ VIES/VATComply odrzuciło numer {kraj_kod}{nip_clean}. Prawdopodobna przyczyna: numer jest nieważny, usługa UE ma awarię lub jest to błędny format.")
+                            st.warning(f"⚠️ VIES/VATComply odrzuciło numer {kraj_kod}{nip_clean}. Prawdopodobna przyczyna: numer jest nieważny, awaria usługi UE lub błędny format.")
                     except Exception as e:
                         st.warning(f"⚠️ Obie bramki VIES zawiodły. Przechodzę do wyszukiwarki. Szczegóły błędu: {e}")
 
         if not sukces_vies:
-            with st.spinner("Szukanie na oficjalnej stronie firmy..."):
+            with st.spinner("Szukanie na oficjalnej stronie firmy (Zużycie API)..."):
                 search_prompt = f"Podaj bezpośredni adres URL strony głównej lub podstrony prawnej (Impressum/Legal/Contact/Terms) dla firmy: {nazwa}, {adres}, {kraj}. Zwróć TYLKO adres URL."
                 search_resp = model.generate_content(search_prompt)
                 match = re.search(r'https?://[^\s)"]+', search_resp.text)
@@ -241,7 +242,7 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
                         pdf_wynik = pdf_bytes
                         surowy_tekst = raw_txt
 
-        with st.spinner("3/3 Przygotowanie raportu..."):
+        with st.spinner("3/3 Przygotowanie raportu (Zużycie API)..."):
             eval_prompt = f"""
             Porównaj dane:
             Użytkownik: {nazwa}, {adres}, NIP: {nip}
