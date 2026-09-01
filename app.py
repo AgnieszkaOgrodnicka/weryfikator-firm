@@ -3,9 +3,20 @@ import asyncio
 import os
 import re
 import json
+import subprocess
 from datetime import datetime
 import google.generativeai as genai
 from playwright.async_api import async_playwright
+
+# --- AUTOMATYCZNA INSTALACJA PRZEGLĄDARKI W CHMURZE ---
+@st.cache_resource
+def install_playwright_browsers():
+    try:
+        subprocess.run(["playwright", "install", "chromium"], check=True)
+    except Exception as e:
+        st.warning(f"Błąd instalacji Playwright: {e}")
+
+install_playwright_browsers()
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(page_title="Weryfikator Kontrahentów", page_icon="🔍", layout="wide")
@@ -164,7 +175,7 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
         if czy_ue and nip:
             with st.spinner("2/3 Sprawdzanie w rejestrze VIES..."):
                 nip_clean = re.sub(r'^[A-Z]{2}', '', nip.strip())
-                kraj_kod = nip[:2].upper() if len(nip) > 2 and nip[:2].isalpha() else "DE"
+                kraj_kod = nip[:2].upper() if len(nip) > 2 and nip[:2].isalpha() else "FR"
                 pdf_bytes, raw_txt, url_vies = asyncio.run(weryfikuj_w_vies(kraj_kod, nip_clean))
                 
                 if pdf_bytes and ("valid" in raw_txt.lower() or "ważny" in raw_txt.lower() or "valide" in raw_txt.lower()):
