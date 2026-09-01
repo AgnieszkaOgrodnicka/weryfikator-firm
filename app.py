@@ -4,14 +4,13 @@ import os
 import re
 import json
 from datetime import datetime
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 from playwright.async_api import async_playwright
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(page_title="Weryfikator Kontrahentów", page_icon="🔍", layout="wide")
 
-# Słownik rejestrów krajowych (możesz dopisywać kraje)
+# Słownik rejestrów krajowych (możesz tu dopisywać państwa)
 REJESTRY_KRAJOWE = {
     "Wielka Brytania": "https://find-and-update.company-information.service.gov.uk/",
     "UK": "https://find-and-update.company-information.service.gov.uk/",
@@ -64,7 +63,9 @@ if not api_key:
     st.error("⚠️ Brak klucza GEMINI_API_KEY w Secrets! Dodaj go w ustawieniach Streamlit Settings -> Secrets.")
     st.stop()
 
-client = genai.Client(api_key=api_key)
+# Konfiguracja Gemini API
+genai.configure(api_key=api_key)
+model = genai.GenerativeModel("gemini-1.5-flash-latest")
 
 wklejony_tekst = st.text_area(
     "Wklej dane kontrahenta (Nazwa, Adres, Kraj, NIP/Tax ID):",
@@ -136,10 +137,7 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
             Tekst:
             {wklejony_tekst}
             """
-            parse_resp = client.models.generate_content(
-                model='gemini-1.5-flash',
-                contents=parse_prompt
-            )
+            parse_resp = model.generate_content(parse_prompt)
             
             czysty_json = re.search(r'\{.*\}', parse_resp.text, re.DOTALL)
             if czysty_json:
@@ -179,14 +177,14 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
         if not sukces_vies:
             with st.spinner("2/3 Szukanie w rejestrach lub na oficjalnej stronie firmy..."):
                 search_prompt = f"""
-                Znajdź bezpośredni adres URL do oficjalnego rejestru firm w kraju: {kraj} lub oficjalnej strony firmy {nazwa} (podstrona Impressum / Legal / Contact / Terms).
-                Dane podmiotu: {nazwa}, {adres}, Tax ID: {nip}.
-                Zwróć TYLKO jeden bezpośredni link URL zaczynający się od http:// lub https://.
+                Podaj bezpośredni adres URL strony głównej lub podstrony prawnej (Impressum/Legal/Contact/Terms) dla firmy:
+                Nazwa: {nazwa}
+                Adres: {adres}
+                Kraj: {kraj}
+                Tax ID: {nip}
+                Zwróć TYLKO bezpośredni adres URL zaczynający się od http:// lub https://.
                 """
-                search_resp = client.models.generate_content(
-                    model='gemini-1.5-flash',
-                    contents=search_prompt
-                )
+                search_resp = model.generate_content(search_prompt)
                 match = re.search(r'https?://[^\s)"]+', search_resp.text)
                 if match:
                     zrodlo_url = match.group(0)
@@ -208,7 +206,7 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
             TEKST ZE STRONY ({zrodlo_url}):
             {surowy_tekst[:5000]}
 
-            Zwróć TYLKO czysty obiekt JSON (bez markdown) w formacie:
+            Zwróć TYLKO czysty obiekt JSON (bez znaczników markdown ```json) w formacie:
             {{
                 "status": "ZIELONY / NIEBIESKI / ZOLTY / CZERWONY",
                 "znaleziona_nazwa": "...",
@@ -225,10 +223,7 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
             - ZOLTY: tylko część danych (brak NIP lub inny adres)
             - CZERWONY: brak potwierdzenia
             """
-            eval_resp = client.models.generate_content(
-                model='gemini-1.5-flash',
-                contents=eval_prompt
-            )
+            eval_resp = model.generate_content(eval_prompt)
             
             wynik_json = re.search(r'\{.*\}', eval_resp.text, re.DOTALL)
             if wynik_json:
