@@ -4,6 +4,7 @@ import os
 import re
 import json
 import subprocess
+import requests
 from datetime import datetime
 import google.generativeai as genai
 from playwright.async_api import async_playwright
@@ -20,15 +21,6 @@ install_playwright_browsers()
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(page_title="Weryfikator Kontrahentów", page_icon="🔍", layout="wide")
-
-# Słownik rejestrów krajowych (możesz tu dopisywać państwa)
-REJESTRY_KRAJOWE = {
-    "Wielka Brytania": "https://find-and-update.company-information.service.gov.uk/",
-    "UK": "https://find-and-update.company-information.service.gov.uk/",
-    "Niemcy": "https://www.handelsregister.de/",
-    "Szwajcaria": "https://www.zefix.ch/en/search/entity/welcome",
-    "USA": "https://opencorporates.com/",
-}
 
 KRAJE_UE = [
     "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "EL", "GR", "ES", "FI", 
@@ -66,51 +58,40 @@ if not check_password():
 
 # --- INTERFEJS GŁÓWNY ---
 st.title("🔍 Automatyczny Weryfikator Kontrahentów")
-st.caption("VIES ➔ Bazy państwowe / komercyjne ➔ Strona zleceniodawcy")
+st.caption("VIES API ➔ Bazy państwowe / komercyjne ➔ Strona zleceniodawcy")
 
 api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
 
 if not api_key:
-    st.error("⚠️ Brak klucza GEMINI_API_KEY w Secrets! Dodaj go w ustawieniach Streamlit Settings -> Secrets.")
+    st.error("⚠️ Brak klucza GEMINI_API_KEY w Secrets!")
     st.stop()
 
-# Konfiguracja Gemini API
 genai.configure(api_key=api_key)
 model = genai.GenerativeModel("gemini-3.6-flash")
 
 wklejony_tekst = st.text_area(
     "Wklej dane kontrahenta (Nazwa, Adres, Kraj, NIP/Tax ID):",
     height=140,
-    placeholder="Przykład:\nAcme Global Ltd\n123 Business Road, London, EC1A 1BB\nUnited Kingdom\nVAT: GB123456789"
+    placeholder="Przykład:\nNYLON FRANCE\n123 RUE DE PARIS\nFrancja\nVAT: FR07883003964"
 )
 
-# --- OBSŁUGA PRZEGLĄDARKI ---
-async def weryfikuj_w_vies(kraj_kod: str, nip_clean: str):
+# --- OBSŁUGA PRZEGLĄDARKI I API ---
+async def generuj_pdf_z_html(html_content: str):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
-        try:
-            await page.goto("https://ec.europa.eu/taxation_customs/vies/#/vat-validation", timeout=30000)
-            await page.wait_for_selector("#select-country", timeout=10000)
-            await page.select_option("#select-country", kraj_kod)
-            await page.fill("#vat-number", nip_clean)
-            await page.click("button[type='submit']")
-            await page.wait_for_timeout(4000)
-            
-            pdf_bytes = await page.pdf(format="A4", print_background=True)
-            text_content = await page.inner_text("body")
-            await browser.close()
-            return pdf_bytes, text_content, "https://ec.europa.eu/taxation_customs/vies/"
-        except Exception as e:
-            await browser.close()
-            return None, str(e), None
+        await page.set_content(html_content)
+        pdf_bytes = await page.pdf(format="A4", print_background=True)
+        await browser.close()
+        return pdf_bytes
 
 async def zrob_zrzut_url(url: str):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+        # Symulacja dużej rozdzielczości ekranu
+        page = await browser.new_page(viewport={"width": 1280, "height": 1080})
         try:
-            await page.goto(url, timeout=30000, wait_until="networkidle")
+            await page.goto(url, timeout=15000, wait_until="load")
             czas_teraz = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             header_script = f"""
             const div = document.createElement('div');
@@ -124,7 +105,21 @@ async def zrob_zrzut_url(url: str):
             document.body.insertBefore(div, document.body.firstChild);
             """
             await page.evaluate(header_script)
-            pdf_bytes = await page.pdf(format="A4", print_background=True)
+            
+            # Pobranie całkowitych wymiarów strony, aby zrobić 1 długi zrzut
+            wymiary = await page.evaluate("""() => {
+                return {
+                    width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth, 1280),
+                    height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, 1080)
+                }
+            }""")
+            
+            pdf_bytes = await page.pdf(
+                width=f"{wymiary['width']}px",
+                height=f"{wymiary['height'] + 50}px",
+                print_background=True
+            )
+            
             text_content = await page.inner_text("body")
             await browser.close()
             return pdf_bytes, text_content
@@ -138,15 +133,12 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
         st.stop()
 
     try:
-        # Krok 1: Parsowanie tekstu
         with st.spinner("1/3 Rozpoznawanie danych firmy..."):
             parse_prompt = f"""
             Wyodrębnij z poniższego tekstu dane firmy.
             Zwróć TYLKO czysty obiekt JSON (bez znaczników markdown) o strukturze:
             {{"nazwa": "...", "adres": "...", "kraj": "...", "nip": "..."}}
-
-            Tekst:
-            {wklejony_tekst}
+            Tekst: {wklejony_tekst}
             """
             parse_resp = model.generate_content(parse_prompt)
             
@@ -161,39 +153,76 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
             kraj = dane.get("kraj", "")
             nip = dane.get("nip", "")
 
-            st.info(f"**Rozpoznano:** {nazwa} | **Kraj:** {kraj} | **NIP/Tax ID:** {nip}")
+            st.info(f"**Rozpoznano:** {nazwa} | **Kraj:** {kraj} | **NIP:** {nip}")
 
         pdf_wynik = None
         zrodlo_url = ""
         surowy_tekst = ""
         nazwa_pliku = format_filename(nazwa)
 
-        # Krok 2: Sprawdzenie w VIES
         czy_ue = any(k.lower() in kraj.lower() for k in KRAJE_UE)
         sukces_vies = False
 
         if czy_ue and nip:
-            with st.spinner("2/3 Sprawdzanie w rejestrze VIES..."):
-                nip_clean = re.sub(r'^[A-Z]{2}', '', nip.strip())
-                kraj_kod = nip[:2].upper() if len(nip) > 2 and nip[:2].isalpha() else "FR"
-                pdf_bytes, raw_txt, url_vies = asyncio.run(weryfikuj_w_vies(kraj_kod, nip_clean))
+            with st.spinner("2/3 Błyskawiczne odpytywanie bazy VIES..."):
+                nip_clean = re.sub(r'[^0-9A-Za-z]', '', nip)
+                match_prefix = re.search(r'^([A-Za-z]{2})', nip_clean)
                 
-                if pdf_bytes and ("valid" in raw_txt.lower() or "ważny" in raw_txt.lower() or "valide" in raw_txt.lower()):
-                    pdf_wynik = pdf_bytes
-                    surowy_tekst = raw_txt
-                    zrodlo_url = url_vies
-                    sukces_vies = True
+                if match_prefix:
+                    kraj_kod = match_prefix.group(1).upper()
+                    nip_clean = nip_clean[2:]
+                else:
+                    mapa_krajow = {"francja": "FR", "niemcy": "DE", "polska": "PL", "wlochy": "IT", "hiszpania": "ES"}
+                    kraj_kod = mapa_krajow.get(kraj.lower(), "FR")
 
-        # Krok 3: Rejestry krajowe / Strona WWW
+                url_vies_api = "https://ec.europa.eu/taxation_customs/vies/rest-api/check-vat-number"
+                try:
+                    resp = requests.post(url_vies_api, json={"countryCode": kraj_kod, "vatNumber": nip_clean}, timeout=10)
+                    vies_dane = resp.json()
+                    
+                    if vies_dane.get("valid"):
+                        sukces_vies = True
+                        zrodlo_url = "Oficjalna Baza API Komisji Europejskiej (VIES)"
+                        surowy_tekst = f"Nazwa: {vies_dane.get('name')}. Adres: {vies_dane.get('address')}."
+                        
+                        html_vies = f"""
+                        <div style="font-family: Arial, sans-serif; padding: 40px; color: #333;">
+                            <h2 style="color: #1e3a8a;">Oficjalne Potwierdzenie VIES (Komisja Europejska)</h2>
+                            <hr>
+                            <p><b>Data weryfikacji:</b> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+                            <p><b>Identyfikator zapytania:</b> {vies_dane.get('requestIdentifier', 'Brak (zapytanie anonimowe)')}</p>
+                            <br>
+                            <h3 style="color: green;">STATUS: AKTYWNY (VALID)</h3>
+                            <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+                                <tr style="border-bottom: 1px solid #ccc;">
+                                    <td style="padding: 10px 0; width: 30%;"><b>Kraj:</b></td>
+                                    <td style="padding: 10px 0;">{vies_dane.get('countryCode')}</td>
+                                </tr>
+                                <tr style="border-bottom: 1px solid #ccc;">
+                                    <td style="padding: 10px 0;"><b>Numer VAT:</b></td>
+                                    <td style="padding: 10px 0;">{vies_dane.get('vatNumber')}</td>
+                                </tr>
+                                <tr style="border-bottom: 1px solid #ccc;">
+                                    <td style="padding: 10px 0;"><b>Zarejestrowana Nazwa:</b></td>
+                                    <td style="padding: 10px 0;">{vies_dane.get('name', 'Brak danych')}</td>
+                                </tr>
+                                <tr style="border-bottom: 1px solid #ccc;">
+                                    <td style="padding: 10px 0;"><b>Zarejestrowany Adres:</b></td>
+                                    <td style="padding: 10px 0;">{vies_dane.get('address', 'Brak danych')}</td>
+                                </tr>
+                            </table>
+                        </div>
+                        """
+                        pdf_wynik = asyncio.run(generuj_pdf_z_html(html_vies))
+                except Exception as e:
+                    pass
+
         if not sukces_vies:
             with st.spinner("2/3 Szukanie w rejestrach lub na oficjalnej stronie firmy..."):
                 search_prompt = f"""
                 Podaj bezpośredni adres URL strony głównej lub podstrony prawnej (Impressum/Legal/Contact/Terms) dla firmy:
-                Nazwa: {nazwa}
-                Adres: {adres}
-                Kraj: {kraj}
-                Tax ID: {nip}
-                Zwróć TYLKO bezpośredni adres URL zaczynający się od http:// lub https://.
+                Nazwa: {nazwa}, Adres: {adres}, Kraj: {kraj}, Tax ID: {nip}.
+                Zwróć TYLKO bezpośredni adres URL.
                 """
                 search_resp = model.generate_content(search_prompt)
                 match = re.search(r'https?://[^\s)"]+', search_resp.text)
@@ -204,35 +233,24 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
                         pdf_wynik = pdf_bytes
                         surowy_tekst = raw_txt
 
-        # Krok 4: Analiza zgodności
         with st.spinner("3/3 Przygotowanie raportu..."):
             eval_prompt = f"""
-            Porównaj dane wklejone przez użytkownika z tekstem pobranym ze strony.
+            Porównaj dane użytkownika z tekstem pobranym ze źródła.
+            Użytkownik: {nazwa}, {adres}, NIP: {nip}
+            Źródło ({zrodlo_url}): {surowy_tekst[:5000]}
 
-            DANE UŻYTKOWNIKA:
-            - Nazwa: {nazwa}
-            - Adres: {adres}
-            - NIP/Tax ID: {nip}
-
-            TEKST ZE STRONY ({zrodlo_url}):
-            {surowy_tekst[:5000]}
-
-            Zwróć TYLKO czysty obiekt JSON (bez znaczników markdown) w formacie:
+            Zwróć TYLKO czysty obiekt JSON (bez znaczników markdown):
             {{
                 "status": "ZIELONY / NIEBIESKI / ZOLTY / CZERWONY",
                 "znaleziona_nazwa": "...",
                 "znaleziony_adres": "...",
                 "znaleziony_nip": "...",
-                "komunikat_roznice": "krótki opis różnic lub braków",
-                "opis_zrodla": "krótki opis strony i ocena wiarygodności",
+                "komunikat_roznice": "krótki opis różnic",
+                "opis_zrodla": "opis i wiarygodność",
                 "cytat_oryginalny": "fragment w języku obcym",
-                "cytat_tlumaczenie": "tłumaczenie fragmentu na język polski"
+                "cytat_tlumaczenie": "tłumaczenie"
             }}
-            Reguły statusów:
-            - ZIELONY: 100% zgodności
-            - NIEBIESKI: pełna zgodność, ale drobne różnice w pisowni
-            - ZOLTY: tylko część danych (brak NIP lub inny adres)
-            - CZERWONY: brak potwierdzenia
+            Reguły: ZIELONY (100% zgodności), NIEBIESKI (pełna zgodność, drobne literówki/różnice w zapisie spółki), ZOLTY (częściowe dane), CZERWONY (brak potwierdzenia).
             """
             eval_resp = model.generate_content(eval_prompt)
             
@@ -240,18 +258,8 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
             if wynik_json:
                 raport = json.loads(wynik_json.group(0))
             else:
-                raport = {
-                    "status": "CZERWONY",
-                    "znaleziona_nazwa": "Brak",
-                    "znaleziony_adres": "Brak",
-                    "znaleziony_nip": "Brak",
-                    "komunikat_roznice": "Nie udało się sparsować odpowiedzi",
-                    "opis_zrodla": zrodlo_url or "Nieznane",
-                    "cytat_oryginalny": "",
-                    "cytat_tlumaczenie": ""
-                }
+                raport = {"status": "CZERWONY", "opis_zrodla": zrodlo_url, "komunikat_roznice": "Błąd interpretacji wyników."}
 
-        # --- WYŚWIETLENIE RAPORTU ---
         st.markdown("---")
         st.subheader("📊 Wynik Weryfikacji")
 
@@ -280,24 +288,19 @@ if st.button("🚀 Rozpocznij weryfikację", type="primary"):
         if raport.get("komunikat_roznice"):
             st.info(f"**Uwagi:** {raport.get('komunikat_roznice')}")
 
-        st.markdown("### 🌐 Informacje o źródle i wiarygodności")
+        st.markdown("### 🌐 Informacje o źródle")
         if zrodlo_url:
             st.write(f"**Źródło:** [{zrodlo_url}]({zrodlo_url})")
         st.write(f"**Ocena wiarygodności:** {raport.get('opis_zrodla', '-')}")
 
-        if raport.get("cytat_oryginalny"):
-            with st.expander("Zobacz oryginalny fragment ze strony oraz tłumaczenie"):
-                st.write(f"**Oryginał:** {raport.get('cytat_oryginalny')}")
-                st.write(f"**Tłumaczenie PL:** {raport.get('cytat_tlumaczenie')}")
-
         if pdf_wynik:
             st.markdown("### 📥 Plik dowodowy")
             st.download_button(
-                label=f"⬇️ Pobierz potwierdzenie ({nazwa_pliku})",
+                label=f"⬇️ Pobierz potwierdzenie PDF ({nazwa_pliku})",
                 data=pdf_wynik,
                 file_name=nazwa_pliku,
                 mime="application/pdf"
             )
 
     except Exception as err:
-        st.error(f"Wystąpił błąd podczas weryfikacji: {str(err)}")
+        st.error(f"Wystąpił błąd: {str(err)}")
