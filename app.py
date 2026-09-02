@@ -36,7 +36,6 @@ if not api_key:
     st.error("⚠️ Brak klucza GEMINI_API_KEY w Secrets!")
     st.stop()
 
-# Automatyczny wybór aktywnego modelu dla Twojego klucza
 genai.configure(api_key=api_key)
 try:
     dostepne_modele = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
@@ -49,9 +48,8 @@ st.markdown("### 1. Wprowadź dane firmy")
 col1, col2 = st.columns(2)
 with col1:
     nazwa = st.text_input("Nazwa firmy")
-    adres = st.text_input("Adres")
+    adres = st.text_input("Adres (wraz z miastem)")
 with col2:
-    kraj = st.text_input("Kraj")
     nip = st.text_input("NIP / Tax ID")
 
 if st.button("🚀 Szukaj informacji", type="primary"):
@@ -63,12 +61,11 @@ if st.button("🚀 Szukaj informacji", type="primary"):
         try:
             prompt = f"""
             Znajdź informacje o poniższej firmie. 
-            Szukaj w pierwszej kolejności w oficjalnych państwowych bazach przedsiębiorstw (np. KRS, Companies House, Handelsregister), a jeśli tam nie ma - na oficjalnej stronie internetowej firmy.
+            Szukaj w pierwszej kolejności w oficjalnych państwowych bazach przedsiębiorstw, a jeśli tam nie ma - na oficjalnej stronie internetowej firmy.
             
             Szukana firma:
             Nazwa: {nazwa}
             Adres: {adres}
-            Kraj: {kraj}
             NIP/Tax ID: {nip}
 
             Zwróć TYLKO czysty obiekt JSON (bez formatowania markdown), zawierający odnalezione dane:
@@ -95,7 +92,6 @@ if st.button("🚀 Szukaj informacji", type="primary"):
                     "typ_zrodla": "Błąd interpretacji"
                 }
 
-            # --- WYŚWIETLENIE WYNIKÓW ---
             st.markdown("---")
             st.subheader("📊 Wynik do ręcznego porównania")
 
@@ -104,7 +100,6 @@ if st.button("🚀 Szukaj informacji", type="primary"):
                 st.markdown("### 📋 Dane wpisane")
                 st.write(f"**Nazwa:** {nazwa if nazwa else '-'}")
                 st.write(f"**Adres:** {adres if adres else '-'}")
-                st.write(f"**Kraj:** {kraj if kraj else '-'}")
                 st.write(f"**NIP:** {nip if nip else '-'}")
             
             with c2:
