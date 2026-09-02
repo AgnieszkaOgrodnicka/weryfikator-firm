@@ -1,39 +1,10 @@
 import streamlit as st
-import asyncio
-import os
-import re
 import json
-import subprocess
-import requests
-from datetime import datetime
+import re
 import google.generativeai as genai
-from playwright.async_api import async_playwright
-
-# --- AUTOMATYCZNA INSTALACJA PRZEGLĄDARKI W CHMURZE ---
-@st.cache_resource
-def install_playwright_browsers():
-    try:
-        subprocess.run(["playwright", "install", "chromium"], check=True)
-    except Exception as e:
-        st.warning(f"Błąd instalacji Playwright: {e}")
-
-install_playwright_browsers()
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(page_title="Weryfikator Kontrahentów", page_icon="🔍", layout="wide")
-
-KRAJE_UE = [
-    "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "EL", "GR", "ES", "FI", 
-    "FR", "HR", "HU", "IE", "IT", "LT", "LU", "LV", "MT", "NL", "PL", "PT", "RO", "SE", "SK",
-    "Austria", "Belgia", "Bułgaria", "Cypr", "Czechy", "Niemcy", "Dania", "Estonia", 
-    "Grecja", "Hiszpania", "Finlandia", "Francja", "Chorwacja", "Węgry", "Irlandia", 
-    "Włochy", "Litwa", "Luksemburg", "Łotwa", "Malta", "Holandia", "Polska", "Portugalia", "Rumunia", "Szwecja", "Słowacja"
-]
-
-def format_filename(nazwa_firmy: str) -> str:
-    czysta_nazwa = re.sub(r'[^a-zA-Z0-9_-]', '_', nazwa_firmy).strip('_')
-    data_dzis = datetime.now().strftime("%Y-%m-%d")
-    return f"{czysta_nazwa}_{data_dzis}.pdf"
 
 # --- LOGOWANIE ---
 def check_password():
@@ -57,250 +28,98 @@ if not check_password():
     st.stop()
 
 # --- INTERFEJS GŁÓWNY ---
-st.title("🔍 Automatyczny Weryfikator Kontrahentów")
-st.caption("VIES API ➔ Bazy państwowe / komercyjne ➔ Strona zleceniodawcy")
+st.title("🔍 Szybki Weryfikator Kontrahentów")
+st.caption("Ręczne wprowadzanie danych ➔ Wyszukiwanie w rejestrach i internecie")
 
 api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
-
 if not api_key:
     st.error("⚠️ Brak klucza GEMINI_API_KEY w Secrets!")
     st.stop()
 
+# Automatyczny wybór aktywnego modelu dla Twojego klucza
 genai.configure(api_key=api_key)
-model = genai.GenerativeModel("gemini-3.6-flash")
+try:
+    dostepne_modele = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+    wybrany_model = "models/gemini-1.5-flash" if "models/gemini-1.5-flash" in dostepne_modele else dostepne_modele[0]
+    model = genai.GenerativeModel(wybrany_model)
+except Exception:
+    model = genai.GenerativeModel("gemini-1.5-flash")
 
-wklejony_tekst = st.text_area(
-    "Wklej dane kontrahenta (Nazwa, Adres, Kraj, NIP/Tax ID):",
-    height=140,
-    placeholder="Przykład:\nNYLON FRANCE\n123 RUE DE PARIS\nFrancja\nVAT: FR07883003964"
-)
+st.markdown("### 1. Wprowadź dane firmy")
+col1, col2 = st.columns(2)
+with col1:
+    nazwa = st.text_input("Nazwa firmy")
+    adres = st.text_input("Adres")
+with col2:
+    kraj = st.text_input("Kraj")
+    nip = st.text_input("NIP / Tax ID")
 
-# --- OBSŁUGA PRZEGLĄDARKI I API ---
-async def generuj_pdf_z_html(html_content: str):
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
-        await page.set_content(html_content)
-        pdf_bytes = await page.pdf(format="A4", print_background=True)
-        await browser.close()
-        return pdf_bytes
-
-async def zrob_zrzut_url(url: str):
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        # Symulacja dużej rozdzielczości ekranu
-        page = await browser.new_page(viewport={"width": 1280, "height": 1080})
-        try:
-            await page.goto(url, timeout=15000, wait_until="load")
-            czas_teraz = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            header_script = f"""
-            const div = document.createElement('div');
-            div.style.backgroundColor = '#1e293b';
-            div.style.color = '#ffffff';
-            div.style.padding = '10px 20px';
-            div.style.fontSize = '14px';
-            div.style.fontFamily = 'Arial, sans-serif';
-            div.style.borderBottom = '2px solid #3b82f6';
-            div.innerHTML = '<b>Zweryfikowano:</b> {czas_teraz} | <b>URL:</b> {url}';
-            document.body.insertBefore(div, document.body.firstChild);
-            """
-            await page.evaluate(header_script)
-            
-            # Pobranie całkowitych wymiarów strony, aby zrobić 1 długi zrzut
-            wymiary = await page.evaluate("""() => {
-                return {
-                    width: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth, 1280),
-                    height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, 1080)
-                }
-            }""")
-            
-            pdf_bytes = await page.pdf(
-                width=f"{wymiary['width']}px",
-                height=f"{wymiary['height'] + 50}px",
-                print_background=True
-            )
-            
-            text_content = await page.inner_text("body")
-            await browser.close()
-            return pdf_bytes, text_content
-        except Exception as e:
-            await browser.close()
-            return None, str(e)
-
-if st.button("🚀 Rozpocznij weryfikację", type="primary"):
-    if not wklejony_tekst.strip():
-        st.warning("Proszę wkleić dane firmy!")
+if st.button("🚀 Szukaj informacji", type="primary"):
+    if not nazwa and not nip:
+        st.warning("Proszę podać przynajmniej nazwę firmy lub NIP!")
         st.stop()
 
-    try:
-        with st.spinner("1/3 Rozpoznawanie danych firmy..."):
-            parse_prompt = f"""
-            Wyodrębnij z poniższego tekstu dane firmy.
-            Zwróć TYLKO czysty obiekt JSON (bez znaczników markdown) o strukturze:
-            {{"nazwa": "...", "adres": "...", "kraj": "...", "nip": "..."}}
-            Tekst: {wklejony_tekst}
-            """
-            parse_resp = model.generate_content(parse_prompt)
+    with st.spinner("Przeszukiwanie baz państwowych i stron internetowych..."):
+        try:
+            prompt = f"""
+            Znajdź informacje o poniższej firmie. 
+            Szukaj w pierwszej kolejności w oficjalnych państwowych bazach przedsiębiorstw (np. KRS, Companies House, Handelsregister), a jeśli tam nie ma - na oficjalnej stronie internetowej firmy.
             
-            czysty_json = re.search(r'\{.*\}', parse_resp.text, re.DOTALL)
-            if czysty_json:
-                dane = json.loads(czysty_json.group(0))
-            else:
-                dane = {"nazwa": wklejony_tekst[:30], "adres": "", "kraj": "", "nip": ""}
+            Szukana firma:
+            Nazwa: {nazwa}
+            Adres: {adres}
+            Kraj: {kraj}
+            NIP/Tax ID: {nip}
 
-            nazwa = dane.get("nazwa", "")
-            adres = dane.get("adres", "")
-            kraj = dane.get("kraj", "")
-            nip = dane.get("nip", "")
-
-            st.info(f"**Rozpoznano:** {nazwa} | **Kraj:** {kraj} | **NIP:** {nip}")
-
-        pdf_wynik = None
-        zrodlo_url = ""
-        surowy_tekst = ""
-        nazwa_pliku = format_filename(nazwa)
-
-        czy_ue = any(k.lower() in kraj.lower() for k in KRAJE_UE)
-        sukces_vies = False
-
-        if czy_ue and nip:
-            with st.spinner("2/3 Błyskawiczne odpytywanie bazy VIES..."):
-                nip_clean = re.sub(r'[^0-9A-Za-z]', '', nip)
-                match_prefix = re.search(r'^([A-Za-z]{2})', nip_clean)
-                
-                if match_prefix:
-                    kraj_kod = match_prefix.group(1).upper()
-                    nip_clean = nip_clean[2:]
-                else:
-                    mapa_krajow = {"francja": "FR", "niemcy": "DE", "polska": "PL", "wlochy": "IT", "hiszpania": "ES"}
-                    kraj_kod = mapa_krajow.get(kraj.lower(), "FR")
-
-                url_vies_api = "https://ec.europa.eu/taxation_customs/vies/rest-api/check-vat-number"
-                try:
-                    resp = requests.post(url_vies_api, json={"countryCode": kraj_kod, "vatNumber": nip_clean}, timeout=10)
-                    vies_dane = resp.json()
-                    
-                    if vies_dane.get("valid"):
-                        sukces_vies = True
-                        zrodlo_url = "Oficjalna Baza API Komisji Europejskiej (VIES)"
-                        surowy_tekst = f"Nazwa: {vies_dane.get('name')}. Adres: {vies_dane.get('address')}."
-                        
-                        html_vies = f"""
-                        <div style="font-family: Arial, sans-serif; padding: 40px; color: #333;">
-                            <h2 style="color: #1e3a8a;">Oficjalne Potwierdzenie VIES (Komisja Europejska)</h2>
-                            <hr>
-                            <p><b>Data weryfikacji:</b> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
-                            <p><b>Identyfikator zapytania:</b> {vies_dane.get('requestIdentifier', 'Brak (zapytanie anonimowe)')}</p>
-                            <br>
-                            <h3 style="color: green;">STATUS: AKTYWNY (VALID)</h3>
-                            <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
-                                <tr style="border-bottom: 1px solid #ccc;">
-                                    <td style="padding: 10px 0; width: 30%;"><b>Kraj:</b></td>
-                                    <td style="padding: 10px 0;">{vies_dane.get('countryCode')}</td>
-                                </tr>
-                                <tr style="border-bottom: 1px solid #ccc;">
-                                    <td style="padding: 10px 0;"><b>Numer VAT:</b></td>
-                                    <td style="padding: 10px 0;">{vies_dane.get('vatNumber')}</td>
-                                </tr>
-                                <tr style="border-bottom: 1px solid #ccc;">
-                                    <td style="padding: 10px 0;"><b>Zarejestrowana Nazwa:</b></td>
-                                    <td style="padding: 10px 0;">{vies_dane.get('name', 'Brak danych')}</td>
-                                </tr>
-                                <tr style="border-bottom: 1px solid #ccc;">
-                                    <td style="padding: 10px 0;"><b>Zarejestrowany Adres:</b></td>
-                                    <td style="padding: 10px 0;">{vies_dane.get('address', 'Brak danych')}</td>
-                                </tr>
-                            </table>
-                        </div>
-                        """
-                        pdf_wynik = asyncio.run(generuj_pdf_z_html(html_vies))
-                except Exception as e:
-                    pass
-
-        if not sukces_vies:
-            with st.spinner("2/3 Szukanie w rejestrach lub na oficjalnej stronie firmy..."):
-                search_prompt = f"""
-                Podaj bezpośredni adres URL strony głównej lub podstrony prawnej (Impressum/Legal/Contact/Terms) dla firmy:
-                Nazwa: {nazwa}, Adres: {adres}, Kraj: {kraj}, Tax ID: {nip}.
-                Zwróć TYLKO bezpośredni adres URL.
-                """
-                search_resp = model.generate_content(search_prompt)
-                match = re.search(r'https?://[^\s)"]+', search_resp.text)
-                if match:
-                    zrodlo_url = match.group(0)
-                    pdf_bytes, raw_txt = asyncio.run(zrob_zrzut_url(zrodlo_url))
-                    if pdf_bytes:
-                        pdf_wynik = pdf_bytes
-                        surowy_tekst = raw_txt
-
-        with st.spinner("3/3 Przygotowanie raportu..."):
-            eval_prompt = f"""
-            Porównaj dane użytkownika z tekstem pobranym ze źródła.
-            Użytkownik: {nazwa}, {adres}, NIP: {nip}
-            Źródło ({zrodlo_url}): {surowy_tekst[:5000]}
-
-            Zwróć TYLKO czysty obiekt JSON (bez znaczników markdown):
+            Zwróć TYLKO czysty obiekt JSON (bez formatowania markdown), zawierający odnalezione dane:
             {{
-                "status": "ZIELONY / NIEBIESKI / ZOLTY / CZERWONY",
                 "znaleziona_nazwa": "...",
                 "znaleziony_adres": "...",
                 "znaleziony_nip": "...",
-                "komunikat_roznice": "krótki opis różnic",
-                "opis_zrodla": "opis i wiarygodność",
-                "cytat_oryginalny": "fragment w języku obcym",
-                "cytat_tlumaczenie": "tłumaczenie"
+                "zrodlo_url": "dokładny adres www, skąd pochodzą dane (zaczynający się od http)",
+                "typ_zrodla": "np. Rejestr państwowy, Strona internetowa"
             }}
-            Reguły: ZIELONY (100% zgodności), NIEBIESKI (pełna zgodność, drobne literówki/różnice w zapisie spółki), ZOLTY (częściowe dane), CZERWONY (brak potwierdzenia).
+            Jeśli nie możesz znaleźć danej informacji, wpisz "Brak danych".
             """
-            eval_resp = model.generate_content(eval_prompt)
+            odpowiedz = model.generate_content(prompt)
             
-            wynik_json = re.search(r'\{.*\}', eval_resp.text, re.DOTALL)
+            wynik_json = re.search(r'\{.*\}', odpowiedz.text, re.DOTALL)
             if wynik_json:
-                raport = json.loads(wynik_json.group(0))
+                dane_ai = json.loads(wynik_json.group(0))
             else:
-                raport = {"status": "CZERWONY", "opis_zrodla": zrodlo_url, "komunikat_roznice": "Błąd interpretacji wyników."}
+                dane_ai = {
+                    "znaleziona_nazwa": "Brak", 
+                    "znaleziony_adres": "Brak", 
+                    "znaleziony_nip": "Brak", 
+                    "zrodlo_url": "Brak", 
+                    "typ_zrodla": "Błąd interpretacji"
+                }
 
-        st.markdown("---")
-        st.subheader("📊 Wynik Weryfikacji")
+            # --- WYŚWIETLENIE WYNIKÓW ---
+            st.markdown("---")
+            st.subheader("📊 Wynik do ręcznego porównania")
 
-        status_str = raport.get("status", "CZERWONY")
-        kolor_map = {
-            "ZIELONY": ("🟢 PEŁNA ZGODNOŚĆ (100%)", "success"),
-            "NIEBIESKI": ("🔵 PEŁNA ZGODNOŚĆ (Drobne różnice w zapisie)", "info"),
-            "ZOLTY": ("🟡 CZĘŚCIOWA ZGODNOŚĆ (Braki w danych)", "warning"),
-            "CZERWONY": ("🔴 BRAK POTWIERDZENIA", "error")
-        }
-        etykieta, typ_alertu = kolor_map.get(status_str, ("🔴 BRAK POTWIERDZENIA", "error"))
-        getattr(st, typ_alertu)(f"**Status:** {etykieta}")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("### 📋 Dane wpisane")
+                st.write(f"**Nazwa:** {nazwa if nazwa else '-'}")
+                st.write(f"**Adres:** {adres if adres else '-'}")
+                st.write(f"**Kraj:** {kraj if kraj else '-'}")
+                st.write(f"**NIP:** {nip if nip else '-'}")
+            
+            with c2:
+                st.markdown("### 🔎 Dane odnalezione")
+                st.write(f"**Nazwa:** {dane_ai.get('znaleziona_nazwa', '-')}")
+                st.write(f"**Adres:** {dane_ai.get('znaleziony_adres', '-')}")
+                st.write(f"**NIP:** {dane_ai.get('znaleziony_nip', '-')}")
+                
+            st.markdown("### 🌐 Źródło")
+            st.write(f"**Typ rejestru/strony:** {dane_ai.get('typ_zrodla', '-')}")
+            url = dane_ai.get("zrodlo_url", "")
+            if url and url.startswith("http"):
+                st.write(f"**Link:** [{url}]({url})")
+            else:
+                st.write(f"**Link:** {url}")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("### 📋 Dane wklejone")
-            st.write(f"**Nazwa:** {nazwa}")
-            st.write(f"**Adres:** {adres}")
-            st.write(f"**NIP / Tax ID:** {nip}")
-        with col2:
-            st.markdown("### 🔎 Dane odnalezione")
-            st.write(f"**Nazwa:** {raport.get('znaleziona_nazwa', '-')}")
-            st.write(f"**Adres:** {raport.get('znaleziony_adres', '-')}")
-            st.write(f"**NIP / Tax ID:** {raport.get('znaleziony_nip', '-')}")
-
-        if raport.get("komunikat_roznice"):
-            st.info(f"**Uwagi:** {raport.get('komunikat_roznice')}")
-
-        st.markdown("### 🌐 Informacje o źródle")
-        if zrodlo_url:
-            st.write(f"**Źródło:** [{zrodlo_url}]({zrodlo_url})")
-        st.write(f"**Ocena wiarygodności:** {raport.get('opis_zrodla', '-')}")
-
-        if pdf_wynik:
-            st.markdown("### 📥 Plik dowodowy")
-            st.download_button(
-                label=f"⬇️ Pobierz potwierdzenie PDF ({nazwa_pliku})",
-                data=pdf_wynik,
-                file_name=nazwa_pliku,
-                mime="application/pdf"
-            )
-
-    except Exception as err:
-        st.error(f"Wystąpił błąd: {str(err)}")
+        except Exception as e:
+            st.error(f"Wystąpił błąd podczas wyszukiwania: {str(e)}")
