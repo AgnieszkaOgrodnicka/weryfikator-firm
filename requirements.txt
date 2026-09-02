@@ -1,5 +1,2 @@
 streamlit
-playwright
 google-generativeai
-pydantic
-requests
